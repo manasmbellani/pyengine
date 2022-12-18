@@ -16,6 +16,7 @@ USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
 
 INPUTS_REGEX = "\{(?P<input>[a-zA-Z0-9_\-]+)\}"
 
+SEPERATOR = "-" * 60 + "\n\n"
 
 class CustomFormatter(argparse.RawTextHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
     pass
@@ -123,17 +124,15 @@ def task_notes(notes, conf):
         warning('')
         warning('')
 
-    else:
-        error("No notes provided")
-
     return all_notes
 
-def task_cmd(cmds, conf):
+def task_cmd(cmds, conf, cmd_dir=''):
     """Execute command(s)
 
     Args:
         cmds (str/list): Shell command(s) to execute
         conf (dict): Configuration with settings to substitute in cmd
+        cmd_dir (str): Command directory
 
     Returns:
         (bool, str): Boolean on whether the command was executed AND output
@@ -142,6 +141,14 @@ def task_cmd(cmds, conf):
     out_text = ""
 
     if cmds:
+        # Setup the current working directory
+        cwd = os.getcwd()
+        if cmd_dir:
+            if os.path.isdir(cmd_dir):
+                os.chdir(cmd_dir)
+            else:
+                error(f"Cmd directory: {cmd_dir} does not exist")
+
         if isinstance(cmds, str):
             cmds = [cmds]
         
@@ -157,6 +164,11 @@ def task_cmd(cmds, conf):
                 was_cmd_successful = True
             except Exception as e:
                 error(f"Error executing command: {c}. Error: {e.__class__}, {e}")
+
+        # Switch back to the current dir
+        if cmd_dir:
+            os.chdir(cwd)
+
     else:
         error("No cmds provided")
         
@@ -278,18 +290,33 @@ def write_to_outfile(outfile, ls):
         for l in ls:
             f.write(l.strip() + "\n")
 
-def parse_input_file(input_file):
-    """Parsing the input file to return the settings
+def parse_input_files(input_files):
+    """Parsing the input files to return the settings
 
     Args:
-        input_file (str): Path to input file
+        input_file (str): Path to input file OR folder which contains input files
 
     Returns:
         dict: A dictionary of settings
     """
-    with open(input_file, "r") as f:
-        settings = yaml.safe_load(f)
-
+    settings = {}
+    input_files = input_files.split(',')
+    for input_file in input_files:
+        if os.path.isfile(input_file):
+            debug(f"Parsing input from file: {input_file}...")
+            with open(input_file, "r") as f:
+                settings[input_file] = yaml.safe_load(f)
+        elif os.path.isdir(input_file):
+            input_folder = input_file
+            for dp, _, files in os.walk(input_folder):
+                for f in files:
+                    p = os.path.join(dp, f)
+                    debug(f"Parsing input from file: {p}...")
+                    with open(p, "r+") as f:
+                        settings[p] = yaml.safe_load(f)
+        else:
+            error(f"Input file/folder: {input_file} does not exist")
+    
     return settings
 
 def parse_checks_files(checks_files, regex):
@@ -387,18 +414,29 @@ def execute_checks(checks_confs, settings, out_folder):
             if task_type == 'cmd':
                 cmds = task_config.get('cmd', 
                       task_config.get('cmds', []))
-                was_cmd_successful, output = task_cmd(cmds, settings)
+                cmd_dir = task_config.get('cmd_dir', 
+                          task_config.get('dir', ''))
+                was_cmd_successful, output = task_cmd(cmds, settings, 
+                    cmd_dir=cmd_dir)
+                
                 info(f"Output of cmd:\n{output}")
                 info('')
                 info('')
-
-            #elif (task_type == 'web_request' or task_type == 'web_request'):    
-            elif (task_type == 'notes'):
-                notes = task_config.get('notes',
-                        task_config.get('note'))
-                task_notes(notes, settings)
+            elif task_type == 'notes':
+                pass
             else:
                 error(f"Error executing task of type: {task_type}")
+
+            #elif (task_type == 'web_request' or task_type == 'web_request'):    
+            #elif (task_type == 'notes'):
+            # Print any notes
+            notes = task_config.get('notes',
+                    task_config.get('note'))
+            task_notes(notes, settings)
+
+        # Separate each task
+        print(SEPERATOR)
+            
 
 def check_if_all_inputs_supplied(inputs, settings):
     """Check if all inputs supplied in settings
@@ -432,10 +470,16 @@ def main():
 
     checks_confs, inputs_to_get = parse_checks_files(args.checks_files, args.regex)
 
-    settings = parse_input_file(args.input_file)
+    settings = parse_input_files(args.input_file)
 
-    if check_if_all_inputs_supplied(inputs_to_get, settings):
-        execute_checks(checks_confs, settings, args.outfolder)
+    for f, settings_f in settings.items():
+        debug(f"Executing checks for file: {f}...")
+        if check_if_all_inputs_supplied(inputs_to_get, settings_f):
+            # Separate each task
+            print(SEPERATOR)
+
+            # Start executing checks
+            execute_checks(checks_confs, settings_f, args.outfolder)
 
     return 0
 
