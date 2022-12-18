@@ -2,15 +2,20 @@
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 
 import requests
 import yaml
+from termcolor import colored
 
 DESCRIPTION = "Script to parse checks files, and execute commands"
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36"
+
+INPUTS_REGEX = "\{(?P<input>[a-zA-Z0-9_\-]+)\}"
+
 
 class CustomFormatter(argparse.RawTextHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
     pass
@@ -25,7 +30,7 @@ def error(msg):
     Returns:
         str: Error string
     """
-    e = "[*] " + msg
+    e = colored("[-] ", 'red') + msg
     print(e)
     return e
 
@@ -34,12 +39,12 @@ def debug(msg):
     Print debug message
 
     Args:
-        err (str): Debug message
+        msg (str): Debug message
 
     Returns:
         str: Message string
     """
-    m = "[*] " + msg
+    m = colored("[*] ", 'white') + msg
     print(m)
     return m
 
@@ -48,12 +53,26 @@ def warning(msg):
     Print warning message
 
     Args:
-        err (str): Debug message
+        msg (str): Warning message
 
     Returns:
         str: Message string
     """
-    m = "[!] " + msg
+    m = colored("[!] ", 'yellow') + msg
+    print(m)
+    return m
+
+def info(msg):
+    """
+    Print info
+
+    Args:
+        msg (str): Info message
+
+    Returns:
+        str: Message string
+    """
+    m = colored("[+] ", 'blue') + msg
     print(m)
     return m
 
@@ -74,11 +93,40 @@ def notes(msg):
         msgs = msgs
     
     for msg in msgs:
-        m = "[!] " + msg
-        print(m)
-        msgs_txt.append(m)
-    
+        warning(msg)
+        msgs_txt.append(msg)
+
     return "\n".join(msgs_txt)
+
+def task_notes(notes, conf):
+    """Print notes
+
+    Args:
+        notes (str): Notes
+        conf (dict): Configuration with settings to substitute in cmd
+
+    Returns:
+        str: Notes to print
+    """
+    all_notes = []
+
+    if notes:
+        if isinstance(notes, str):
+            notes = [notes]
+        
+        for note in notes:
+            note = sub_conf(note, conf)
+            warning(note)
+            all_notes.append(note)
+        
+        # Additional Blank space
+        warning('')
+        warning('')
+
+    else:
+        error("No notes provided")
+
+    return all_notes
 
 def task_cmd(cmds, conf):
     """Execute command(s)
@@ -92,21 +140,25 @@ def task_cmd(cmds, conf):
     """
     was_cmd_successful = False
     out_text = ""
-    if isinstance(cmds, str):
-        cmds = [cmds]
-    
-    # Join all commands together to execute in the shell
-    cmd_to_exec = "; ".join(cmds)
 
-    for c in cmds:
-        try:
-            debug(f"Executing command: {cmd_to_exec}...")
-            p = subprocess.Popen(sub_conf.format(cmd_to_exec, conf), shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            out, __ = p.communicate()
-            out_text = out.decode().strip()
-            was_cmd_successful = True
-        except Exception as e:
-            error(f"Error executing command: {c}. Error: {e.__class__}, {e}")
+    if cmds:
+        if isinstance(cmds, str):
+            cmds = [cmds]
+        
+        # Join all commands together to execute in the shell
+        cmd_to_exec = "; ".join(cmds)
+
+        for c in cmds:
+            try:
+                debug(f"Executing command: {cmd_to_exec}...")
+                p = subprocess.Popen(sub_conf(cmd_to_exec, conf), shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                out, __ = p.communicate()
+                out_text = out.decode().strip()
+                was_cmd_successful = True
+            except Exception as e:
+                error(f"Error executing command: {c}. Error: {e.__class__}, {e}")
+    else:
+        error("No cmds provided")
         
     return was_cmd_successful, out_text
 
@@ -226,79 +278,166 @@ def write_to_outfile(outfile, ls):
         for l in ls:
             f.write(l.strip() + "\n")
 
+def parse_input_file(input_file):
+    """Parsing the input file to return the settings
+
+    Args:
+        input_file (str): Path to input file
+
+    Returns:
+        dict: A dictionary of settings
+    """
+    with open(input_file, "r") as f:
+        settings = yaml.safe_load(f)
+
+    return settings
+
 def parse_checks_files(checks_files, regex):
-    """Parse the checks files
+    """Parse the checks files and also identifies the inputs
 
     Args:
         checks_file (str): Checks files
         regex (str): Regex specifying which checks files to parse/execute
 
     Returns:
-        dict: Checks file configuration for each file parsed
+        (dict, list) : A list of checks file configuration for each file parsed and list of inputs
     """
     all_conf = {}
+    all_inputs = set()
     checks_fs = checks_files.split(",")
 
     for check_f in checks_fs:
         if os.path.isfile(check_f.strip()):
-            with open(check_f.strip(), "r") as fo:
-                try:
-                    yaml_conf = yaml.safe_load(fo)
-                    all_conf[check_f] = yaml_conf
-                except Exception as e:
-                    error(f"Error parsing file: {check_f}. Error: {e.__class__}, {e}")
+            # Check if file should be executed
+            m = re.search(regex, check_f, re.I)
+
+            if m:
+                debug(f"Parsing conf file: {check_f} for inputs and YAML config...")
+                with open(check_f.strip(), "r") as fo:
+
+                    # Identifying the inputs
+                    inputs = re.findall(INPUTS_REGEX, fo.read(), re.M|re.I)
+                    for input in inputs:
+                        all_inputs.add(input)
+
+                with open(check_f.strip(), "r") as fo:
+                    try:
+                        yaml_conf = yaml.safe_load(fo)
+                        all_conf[check_f] = yaml_conf
+                    except Exception as e:
+                        error(f"Error parsing file: {check_f}. Error: {e.__class__}, {e}")
 
         elif os.path.isdir(check_f.strip()):
             for dir, _, files in os.walk(check_f.strip()):
                 for f in files:
                     p = os.path.join(dir, f)
-                    with open(p, "r") as fo:
-                        try:
-                            yaml_conf = yaml.safe_load(fo)
-                            all_conf[p] = (yaml_conf)
-                        except Exception as e:
-                            error(f"Error parsing file: {check_f}. Error: {e.__class__}, {e}")
+
+                    m = re.search(regex, p, re.I)
+                    if m:
+                        debug(f"Parsing conf file: {p} for inputs and YAML config...")
+                        with open(p, "r") as fo:
+                            inputs = re.findall(INPUTS_REGEX, fo.read(), re.M|re.I)
+                            for input in inputs:
+                                all_inputs.add(input)
+                        
+                        with open(p, "r") as fo:
+                            try:
+                                yaml_conf = yaml.safe_load(fo)
+                                all_conf[p] = yaml_conf
+                            except Exception as e:
+                                error(f"Error parsing file: {check_f}. Error: {e.__class__}, {e}")
         else:
             error(f"Unknown check file path type: {check_f}")
 
-    return all_conf
+    return all_conf, list(all_inputs)
 
-def trigger_notisfile(file_path):
-    """Trigger if the file doesn't exist
+def create_outfolder(outfolder):
+    """Create the output folder
 
     Args:
-        file (str): File path to check
+        outfolder (str): Output folder
     """
-    return not os.path.isfile(file_path)
+    if os.path.isdir(outfolder):
+        debug(f"Removing existing outfolder: {outfolder}...")
+        shutil.rmtree(outfolder)
 
-def execute_check(checks_confs):
-    """Execute the check based on the configuration provided
+    debug(f"Creating outfolder: {outfolder}...")
+    os.mkdir(outfolder)
+
+def execute_checks(checks_confs, settings, out_folder):
+    """Execute the check based on the configuration files provided
 
     Args:
         checks_confs (dict): Checks configuration provided
-
-    Returns:
-
+        settings (dict): Settings
+        out_folder (str): Output folder to write the output
     """
-    for check_conf in checks_conf
+    for check_conf_file, conf in checks_confs.items():
+        debug(f"Executing conf from file: {check_conf_file}...")
+        summary = conf.get('summary')
+        if summary:
+            debug(f"Summary: {summary}")
+        description = conf.get('description')
+        if description:
+            debug(f"Description: {description}...")
+        task_config = conf.get('task')
+        if task_config:
+            task_type = task_config.get('task_type', 
+                        task_config.get('type'))
+            if task_type == 'cmd':
+                cmds = task_config.get('cmd', 
+                      task_config.get('cmds', []))
+                was_cmd_successful, output = task_cmd(cmds, settings)
+                info(f"Output of cmd:\n{output}")
+                info('')
+                info('')
 
+            #elif (task_type == 'web_request' or task_type == 'web_request'):    
+            elif (task_type == 'notes'):
+                notes = task_config.get('notes',
+                        task_config.get('note'))
+                task_notes(notes, settings)
+            else:
+                error(f"Error executing task of type: {task_type}")
+
+def check_if_all_inputs_supplied(inputs, settings):
+    """Check if all inputs supplied in settings
+
+    Args:
+        inputs (list): Inputs found in the checks file
+        settings (dict): Settings parsed from inputs file
+    """
+    all_inputs_supplied = True
+    for input in inputs:
+        if input not in settings:
+            error(f"input: {input} not supplied in settings")
+            all_inputs_supplied = False
+
+    return all_inputs_supplied
 
 def main():
     parser = argparse.ArgumentParser(description=DESCRIPTION, formatter_class=CustomFormatter)
     parser.add_argument("-c", "--checks-files", required=True,
         help="YAML Configuration Files which contain checks to perform. Can be multiple files"
             "split with ',' OR a directory")
+    parser.add_argument("-i", "--input-file", required=True, 
+        help="Input file in YAML format to execute the checks on which contains a dictionary")
     parser.add_argument("-r", "--regex", default=".*", help="Regex specifying which checks file to parse and exec")
     parser.add_argument("-of", "--outfolder", default="outfolder", help="Output folder")
     parser.add_argument("-t", "--targets", default="", help="List of Targets (comma-separated)")
-    parser.add_argument("-s", "--settings", help="Settings KV pair to use for each target")
     
     args = parser.parse_args()
 
-    
+    create_outfolder(args.outfolder)
 
-    for c in args.checks_file
-    
+    checks_confs, inputs_to_get = parse_checks_files(args.checks_files, args.regex)
+
+    settings = parse_input_file(args.input_file)
+
+    if check_if_all_inputs_supplied(inputs_to_get, settings):
+        execute_checks(checks_confs, settings, args.outfolder)
+
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())
